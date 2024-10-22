@@ -1,0 +1,167 @@
+##### 16S rRNA gene amplicon sequencing - QIIME2 processing #####
+######################## IMPORTING FILES ################################################
+
+module load qiime2 
+
+## Data imported and changed to a qiime artifact file
+
+qiime tools import \
+  --type 'SampleData[PairedEndSequencesWithQuality]' \
+  --input-path /srv/home/s4668253/QMP/RawData/manifest.txt \
+  --input-format PairedEndFastqManifestPhred33V2 \
+  --output-path /srv/home/s4668253/QMP/demux-paired-end.qza
+
+######################## REMOVING PRIMERS ################################################
+  
+qiime cutadapt trim-paired \
+  --i-demultiplexed-sequences /srv/home/s4668253/QMP/demux-paired-end.qza \
+  --p-front-f GTGYCAGCMGCCGCGGTAA \
+  --p-front-r GGACTACNVGGGTWTCTAAT \
+  --p-discard-untrimmed \
+  --p-error-rate 0.1 \
+  --o-trimmed-sequences ./Trim_qmp2 \
+  --verbose
+
+######################## QUALITY CHECK ################################################
+
+# Create visualisation files to look in Qiime2View. The things to look for are:
+# 1) Where does the median quality score drop below 30? That will provide an indication
+# for where to truncate sequences in Dada2.
+# 2) Are there some samples with very low read counts (<1000)? If so, we may want to
+# omit those samples from the analysis in R.
+
+qiime demux summarize \
+  --i-data /srv/home/s4668253/Trim_qmp/trimmed_sequences.qza \
+  --o-visualization /srv/home/s4668253/QMP/trimmed_sequences.qzv
+
+######################## DENOISING ################################################
+
+# Output files are: table.trimmed.qza, rep_seq.trimmed.qza and denoising_stats.trimmed.qza
+
+# In principle, Dada2 should be applied to all samples that were sequenced with the
+# same primer in a given run. Then, samples not belonging to us can be removed using
+# and identifier-based filering (not done here). 
+
+# Truncation lengths are chosen based on quality scores between 30-35
+
+qiime dada2 denoise-paired \
+  --i-demultiplexed-seqs /srv/home/s4668253/QMP/Trim_qmp/trimmed_sequences.qza \
+  --p-trunc-len-f 240 \
+  --p-trunc-len-r 200 \
+  --o-table /srv/home/s4668253/QMP/table.trimmedSeq_V3.qza \
+  --o-representative-sequences /srv/home/s4668253/QMP/rep-seqs.trimmed_V3.qza \
+  --o-denoising-stats /srv/home/s4668253/QMP/denoising-stats.trimmed_V3.qza
+  
+######################## GENERATE SUMMARY FILES #########################################
+
+qiime feature-table summarize \
+--i-table /srv/home/s4668253/QMP/table.trimmedSeq.qza \
+--m-sample-metadata-file /srv/home/s4668253/QMP/metadata.txt \
+--o-visualization /srv/home/s4668253/QMP/table.trim_V3.qzv \
+--verbose
+
+qiime metadata tabulate \
+  --m-input-file /srv/home/s4668253/QMP/denoising-stats.trimmed_V3.qza \
+  --o-visualization /srv/home/s4668253/QMP/denoising-stats.trimmed_V3.qzv \
+  --verbose 
+
+# Open 16_denoising_stats.qzv in Qiime2 view, Download the .tsv file and calculate
+# the sums and averages of the outputs in excel.
+# Totals before quality control is in first column; total after filtering,
+# denoising and chimera removal is in last column. If too many sequences do not pass
+# denoising, try changing truncation length (based on quality scores).
+# Try trimming to a more conservative number (keep less nucleotides). This works because
+# Dada2 will not merge sequences that do not match exactly. There needs to be at least
+# 50 nucleotides of overlap though.
+  
+
+########################### ASSIGNING TAXONOMY ###################
+
+# First train the Silva database to classify bacterial 16S rRNA reads based on your primer regions. Then, each ASV is classified to the highest
+# resolution based on this classifier. 
+# n-jobs = 1 means that the script is run using all available cores
+# Note that the classifier needs to be trained first!
+
+qiime feature-classifier fit-classifier-naive-bayes \
+--i-reference-reads /srv/home/s4668253/QMP/silva-138-99-seqs-515-806.qza \
+--i-reference-taxonomy /srv/home/s4668253/QMP/silva-138-99-tax-515-806.qza \
+--o-classifier /srv/home/s4668253/QMP/silva-138.1-ssu-nr99-515f-806r-EMPclassifier.qza
+    
+qiime feature-classifier classify-sklearn \
+  --i-classifier /srv/home/s4668253/QMP/silva-138.1-ssu-nr99-515f-806r-EMPclassifier.qza \
+  --i-reads  /srv/home/s4668253/QMP/rep-seqs.trimmed_V3.qza  \
+  --p-n-jobs 1 \
+  --o-classification /srv/home/s4668253/QMP/silva138.taxonomy.qza \
+  --verbose  
+
+qiime metadata tabulate \
+  --m-input-file /srv/home/s4668253/QMP/silva138.taxonomy.qza \
+  --o-visualization /srv/home/s4668253/QMP/taxonomy.qzv \
+  --verbose
+
+################### REMOVING MITOCHONDRIA AND CHLOROPLASTS ############################
+
+# The taxa will be removed from the feature table but not from the taxonomy file.
+# That will not be an issue in R if the taxonomy and feature table are imported
+# separately and then combined into a Phyloseq object once in R.
+# (However, if you decide to import both instances merged in the biom file,
+# them remove the mitochondria and chloroplats in R, not in Qiime2).
+
+qiime taxa filter-table \
+--i-table /srv/home/s4668253/QMP/table.trimmedSeq_V3.qza \
+--i-taxonomy /srv/home/s4668253/QMP/silva138.taxonomy.qza \
+--p-exclude Mitochondria,Chloroplast \
+--o-filtered-table /srv/home/s4668253/QMP/table_filtered.qza  
+
+qiime feature-table summarize \
+--i-table /srv/home/s4668253/QMP/table_filtered.qza \
+--m-sample-metadata-file /srv/home/s4668253/QMP/metadata.txt \
+--o-visualization /srv/home/s4668253/QMP/table_filtered.qzv \
+--verbose
+
+################## BUILDING PHYLOGENETIC TREE #########################################
+
+qiime phylogeny align-to-tree-mafft-fasttree \
+  --i-sequences /srv/home/s4668253/QMP/rep-seqs.trimmed_V3.qza \
+  --output-dir /srv/home/s4668253/QMP/phylogeny-align-to-tree-mafft-fasttree 
+
+
+################## EXPORTING DATA FOR FURTHER ANAYLSIS IN R ##############################
+
+mkdir Export 
+
+# The ASV table, taxonomy file, metadata and phylogenetic tree will be imported into R
+# and combined into a phyloseq object.
+
+# Export trees as .nwk format as required for the R package phyloseq
+
+qiime tools export \
+--input-path /srv/home/s4668253/QMP/phylogeny-align-to-tree-mafft-fasttree/tree.qza \
+--output-path /srv/home/s4668253/QMP/Export
+
+qiime tools export \
+--input-path /srv/home/s4668253/QMP/phylogeny-align-to-tree-mafft-fasttree/rooted_tree.qza \
+--output-path /srv/home/s4668253/QMP/Export/rooted_tree.nwk \
+
+# Convert the feature table (frequency) artifact into a .biom table
+
+qiime tools export \
+--input-path /srv/home/s4668253/QMP/table_filtered.qza \
+--output-path  /srv/home/s4668253/QMP/Export
+
+# Then export the .biom table into .tsv
+
+biom convert \
+-i /srv/home/s4668253/QMP/Export/feature-table.biom \
+-o /srv/home/s4668253/QMP/Export/feature-table.tsv \
+--to-tsv
+
+# Export Taxonomy into .tsv
+
+qiime tools export \
+--input-path /srv/home/s4668253/QMP/silva138.taxonomy.qza \
+--output-path /srv/home/s4668253/QMP/Export
+
+# Take the feature-table.tsv file, the tree.nwk, taxonomy.tsv and metadata.tsv to import
+# them in R, combine them into a single phyloseq object and start further analyses
+
