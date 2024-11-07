@@ -1,4 +1,4 @@
-QIIME2 and R scripts for "Development of a quantitative PMA-16S rRNA gene sequencing framework for absolute abundance measurements of seawater microbial communities"
+QIIME2 and R scripts for "Development of a quantitative PMA-16S rRNA gene sequencing workflow for absolute abundance measurements of seawater microbial communities"
 
 Demultiplexed sequences and metadata are accessible in the NCBI Sequence Read Archives under BioProject number PRJNA1176196.
 
